@@ -11,8 +11,8 @@ defmodule Fika.Compiler.TypeChecker.ParallelTypeChecker do
   alias Fika.Compiler.TypeChecker.Types, as: T
 
   # Returns :ok | :error
-  def check(module_name, ast) do
-    start_link(module_name, ast)
+  def check(module_name, function_asts) do
+    start_link(module_name, function_asts)
 
     receive do
       {:result, result} ->
@@ -21,10 +21,10 @@ defmodule Fika.Compiler.TypeChecker.ParallelTypeChecker do
     end
   end
 
-  def start_link(module_name, ast) do
+  def start_link(module_name, function_asts) do
     pid = self()
-    signature_map = signature_map(ast)
-    GenServer.start_link(__MODULE__, [pid, module_name, signature_map, ast])
+    signature_map = signature_map(function_asts)
+    GenServer.start_link(__MODULE__, [pid, module_name, signature_map])
   end
 
   def get_result(pid, signature) do
@@ -32,10 +32,16 @@ defmodule Fika.Compiler.TypeChecker.ParallelTypeChecker do
   end
 
   def post_result(pid, signature, result) do
+    result =
+      case result do
+        {:ok, %T.Loop{type: type}} -> {:ok, type}
+        other -> other
+      end
+
     GenServer.cast(pid, {:post_result, signature, result})
   end
 
-  def init([caller_pid, module_name, signature_map, ast]) do
+  def init([caller_pid, module_name, signature_map]) do
     state = %{
       caller_pid: caller_pid,
       module_name: module_name,
@@ -43,8 +49,7 @@ defmodule Fika.Compiler.TypeChecker.ParallelTypeChecker do
       unchecked_functions: signature_map,
       checked_functions: %{},
       waiting: %{},
-      error_found: false,
-      ast: ast
+      error_found: false
     }
 
     Logger.debug("Initializing ParallelTypeChecker for #{module_name}")
@@ -56,18 +61,8 @@ defmodule Fika.Compiler.TypeChecker.ParallelTypeChecker do
     pid = self()
 
     Enum.each(state.unchecked_functions, fn {signature, function} ->
-      # We need to use this approach instead of Task.async_stream due to
-      # timeout and concurrency issues
       Task.start_link(fn ->
-        result =
-          function
-          |> TypeChecker.check(%{
-            ast: state.ast,
-            module_name: state.module_name,
-            current_signature: signature,
-            type_checker_pid: pid
-          })
-
+        result = TypeChecker.check(function, %{type_checker_pid: pid})
         __MODULE__.post_result(pid, signature, result)
       end)
     end)
@@ -139,14 +134,6 @@ defmodule Fika.Compiler.TypeChecker.ParallelTypeChecker do
     Map.put(state, :waiting, waiting)
   end
 
-  defp mark_function(state, signature, {:ok, %T.Loop{type: result}}) do
-    %{
-      state
-      | unchecked_functions: Map.delete(state.unchecked_functions, signature),
-        checked_functions: Map.put(state.checked_functions, signature, result)
-    }
-  end
-
   defp mark_function(state, signature, result) do
     %{
       state
@@ -176,8 +163,8 @@ defmodule Fika.Compiler.TypeChecker.ParallelTypeChecker do
     state
   end
 
-  defp signature_map(ast) do
-    Enum.map(ast[:function_defs], fn function ->
+  defp signature_map(function_asts) do
+    Enum.map(function_asts, fn function ->
       signature = TypeChecker.function_ast_signature(function)
       {signature, function}
     end)

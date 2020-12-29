@@ -3,7 +3,7 @@ defmodule Fika.Compiler.TypeChecker.SequentialTypeChecker do
 
   def get_result(signature, env) do
     if function = find_by_signature(env.ast[:function_defs], signature) do
-      TypeChecker.infer(function, env)
+      TypeChecker.infer_and_unwrap_loop(function, env)
     else
       {:error, "Function #{signature} not found"}
     end
