@@ -2,7 +2,6 @@ defmodule Fika.Compiler.TypeChecker do
   alias Fika.Compiler.TypeChecker.Types, as: T
 
   alias Fika.Compiler.CodeServer
-  alias Fika.Compiler.CodeServer.FunctionDependencies
 
   alias Fika.Compiler.TypeChecker.{
     ParallelTypeChecker,
@@ -21,74 +20,60 @@ defmodule Fika.Compiler.TypeChecker do
         result
 
       {:ok, inferred_type} ->
-        unwrap_loop(env, expected_type, inferred_type)
+        {:error, "Expected type: #{expected_type}, got: #{inferred_type}"}
 
       error ->
         error
     end
   end
 
-  defp unwrap_loop(env, t, %T.Loop{type: t} = loop_type) do
-    # The function can be a top-level function which depends on a loop
-    # In this case, we can unwrap the loop
+  # Given the AST of a function definition, this function infers the
+  # return type of the body of the function.
+  def infer({:function, _line, {name, args, _type, exprs}} = function, env) do
+    Logger.debug("Inferring type of function: #{name}")
 
-    case CodeServer.check_cycle(env[:current_signature]) do
-      :ok ->
-        {:ok, t}
+    env =
+      env
+      |> Map.put(:scope, %{})
+      |> Map.put(:has_effect, false)
+      |> Map.put(:has_cycle, false)
+      |> Map.put(:current_signature, function_ast_signature(function))
+      |> add_args_to_scope(args)
 
-      _ ->
-        {:error, "Expected type: #{t}, got: #{loop_type}"}
+    case infer_block(env, exprs) do
+      {:ok, type, env} ->
+        type =
+          type
+          |> maybe_wrap_effect(env)
+          |> maybe_wrap_loop(env)
+
+        {:ok, type}
+
+      error ->
+        error
     end
   end
 
-  defp unwrap_loop(_env, t, t), do: {:ok, t}
+  def infer_and_unwrap_loop(function_def, env) do
+    case infer(function_def, env) do
+      {:ok, %T.Loop{type: type}} -> {:ok, type}
+      other -> other
+    end
+  end
 
-  defp unwrap_loop(_env, expected_type, inferred_type),
-    do: {:error, "Expected type: #{expected_type}, got: #{inferred_type}"}
-
-  # Given the AST of a function definition, this function infers the
-  # return type of the body of the function.
-  def infer({:function, _line, {name, args, _type, exprs}}, env) do
-    Logger.debug("Inferring type of function: #{name}")
-
-    mfa = {env[:module_name], name, get_arg_types(args)}
-
-    check_loop =
-      if latest_call = env[:latest_called_function] do
-        FunctionDependencies.set_function_dependency(
-          env.callstack,
-          latest_call,
-          mfa
-        )
-      end
-
-    if check_loop == {:error, :cycle_encountered} do
-      Logger.debug("Found loop into function #{inspect(mfa)}")
-      {:ok, T.Loop.new()}
+  defp maybe_wrap_effect(type, env) do
+    if env[:has_effect] do
+      %T.Effect{type: type}
     else
-      Logger.debug("First call to #{inspect(mfa)}")
+      type
+    end
+  end
 
-      env =
-        env
-        |> Map.put(:scope, %{})
-        |> Map.put(:has_effect, false)
-        |> add_args_to_scope(args)
-        |> set_latest_call(mfa)
-
-      case infer_block(env, exprs) do
-        {:ok, type, env} ->
-          type =
-            if env[:has_effect] do
-              %T.Effect{type: type}
-            else
-              type
-            end
-
-          {:ok, type}
-
-        error ->
-          error
-      end
+  defp maybe_wrap_loop(type, env) do
+    if env[:has_cycle] do
+      %T.Loop{type: type}
+    else
+      type
     end
   end
 
@@ -286,7 +271,7 @@ defmodule Fika.Compiler.TypeChecker do
     signature = get_function_signature(function_name, arg_types)
 
     case get_type(module, signature, env) do
-      {:ok, type} ->
+      {:ok, type, env} ->
         type = %T.FunctionRef{arg_types: arg_types, return_type: type}
         {:ok, type, env}
 
@@ -401,11 +386,11 @@ defmodule Fika.Compiler.TypeChecker do
         signature = get_function_signature(exp.name, type_acc)
 
         case get_type(module, signature, env) do
-          {:ok, %T.Effect{type: type}} ->
+          {:ok, %T.Effect{type: type}, env} ->
             env = Map.put(env, :has_effect, true)
             {:ok, type, env}
 
-          {:ok, type} ->
+          {:ok, type, env} ->
             {:ok, type, env}
 
           error ->
@@ -499,42 +484,48 @@ defmodule Fika.Compiler.TypeChecker do
     end)
   end
 
-  defp set_latest_call(env, mfa) do
-    env
-    |> Map.put(:latest_called_function, mfa)
-    |> Map.put_new(:callstack, FunctionDependencies.new_graph())
-  end
-
   defp get_function_signature(function_name, arg_types) do
     "#{function_name}(#{Enum.join(arg_types, ", ")})"
   end
 
-  defp get_arg_types(arg_expression) do
-    # Expects [{:identifier, _, name}, {:type, _, type} | _]
-    Enum.map(arg_expression, fn {_, {:type, _, t}} -> t end)
+  defp get_type(module, signature, env) do
+    case CodeServer.set_function_dependency(env[:current_signature], signature) do
+      {:error, :cycle_encountered} ->
+        env = Map.put(env, :has_cycle, true)
+        {:ok, :Nothing, env}
+
+      _ ->
+        case do_get_type(module, signature, env) do
+          {:ok, :Nothing} ->
+            env =
+              if CodeServer.has_cyclic_dependency(env[:current_signature]) do
+                Map.put(env, :has_cycle, true)
+              else
+                env
+              end
+
+            {:ok, :Nothing, env}
+
+          {:ok, type} ->
+            {:ok, type, env}
+
+          other ->
+            other
+        end
+    end
   end
 
-  defp get_type(module, target_signature, env) do
-    is_local_call = is_nil(module) or module == env[:module_name]
-
-    current_signature = env[:current_signature]
-
-    pid = env[:type_checker_pid]
-
-    function_dependency = CodeServer.set_function_dependency(current_signature, target_signature)
-
-    case {is_local_call, function_dependency, pid} do
-      {true, :ok, pid} when is_pid(pid) ->
-        ParallelTypeChecker.get_result(pid, target_signature)
-
-      {true, :ok, nil} ->
-        SequentialTypeChecker.get_result(target_signature, env)
-
-      {true, {:error, :cycle_encountered}, _} ->
-        {:ok, T.Loop.new()}
-
-      {false, _, _} ->
-        CodeServer.get_type(module, target_signature)
+  # Local function
+  defp do_get_type(nil, signature, env) do
+    if pid = env[:type_checker_pid] do
+      ParallelTypeChecker.get_result(pid, signature)
+    else
+      SequentialTypeChecker.get_result(signature, env)
     end
+  end
+
+  # Remote function
+  defp do_get_type(module, signature, _env) do
+    CodeServer.get_type(module, signature)
   end
 end

@@ -52,13 +52,13 @@ defmodule Fika.Compiler.ModuleCompilerTest do
   end
 
   test "returns error when file doesn't exist" do
-    module = Path.join(System.tmp_dir!(), "foo") |> String.to_atom()
+    module = Path.join(System.tmp_dir!(), "foo")
 
     assert {:error, "Cannot read file #{module}.fi: :enoent"} == ModuleCompiler.compile(module)
   end
 
   test "returns error when file cannot be parsed" do
-    module = Path.join(System.tmp_dir!(), "foo") |> String.to_atom()
+    module = Path.join(System.tmp_dir!(), "foo")
 
     temp_file = "#{module}.fi"
 
@@ -74,7 +74,7 @@ defmodule Fika.Compiler.ModuleCompilerTest do
   end
 
   test "returns error when type check fails" do
-    module = Path.join(System.tmp_dir!(), "foo") |> String.to_atom()
+    module = Path.join(System.tmp_dir!(), "foo")
 
     temp_file = "#{module}.fi"
 
@@ -92,7 +92,8 @@ defmodule Fika.Compiler.ModuleCompilerTest do
   end
 
   test "does not hang when there is local recursion with both direct and indirect cycles" do
-    module = Path.join(System.tmp_dir!(), "foo") |> String.to_atom()
+    tmp_dir = System.tmp_dir!()
+    module = Path.join(tmp_dir, "foo")
 
     temp_file = "#{module}.fi"
 
@@ -126,43 +127,37 @@ defmodule Fika.Compiler.ModuleCompilerTest do
 
     File.write!(temp_file, str)
 
-    assert {:error, "Type check error"} == ModuleCompiler.compile(module)
+    File.cd!(tmp_dir, fn ->
+      assert {:ok, "foo", "foo.fi", _binary} = ModuleCompiler.compile("foo")
+    end)
 
     File.rm!(temp_file)
   end
 
   test "infer return type when the recursion is not at the top level" do
     tmp_dir = System.tmp_dir!()
-    module = Path.join(tmp_dir, "foo") |> String.to_atom()
+    module = Path.join(tmp_dir, "foo")
 
     temp_file = "#{module}.fi"
 
     str = """
-    fn factorial(x: Int) : Int do
-      do_factorial(x, 0)
+    fn foo(x: Int) : Nothing do
+      do_foo(x, 0)
     end
 
-    fn do_factorial(x: Int, acc: Int) : Loop(Int) do
-      if x <= 1 do
-        acc
-      else
-        do_factorial(x - 1, acc * x)
-      end
+    fn do_foo(x: Int, acc: Int) : Loop(Nothing) do
+      do_foo(x - 1, acc * x)
     end
 
-    fn top_level(x: Int) : Int do
+    fn top_level(x: Int) : Nothing do
       second_level_a(x)
     end
 
-    fn second_level_a(x: Int) : Loop(Int) do
-      if x > 1 do
-        second_level_b(x - 1)
-      else
-        1
-      end
+    fn second_level_a(x: Int) : Loop(Nothing) do
+      second_level_b(x - 1)
     end
 
-    fn second_level_b(x: Int) : Loop(Int) do
+    fn second_level_b(x: Int) : Loop(Nothing) do
       second_level_a(x - 1)
     end
     """

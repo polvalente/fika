@@ -6,10 +6,9 @@ defmodule Fika.Compiler.CodeServer do
   alias Fika.Compiler.{
     DefaultTypes,
     ModuleCompiler,
-    ErlTranslate
+    ErlTranslate,
+    CodeServer.FunctionDependencies
   }
-
-  alias Fika.Compiler.TypeChecker.Types, as: T
 
   def start_link(_) do
     GenServer.start_link(__MODULE__, nil, name: __MODULE__)
@@ -36,7 +35,7 @@ defmodule Fika.Compiler.CodeServer do
   end
 
   def reset do
-    GenServer.cast(__MODULE__, :reset)
+    GenServer.call(__MODULE__, :reset)
   end
 
   # Loads the accumulated binaries which were collected as a result of
@@ -61,10 +60,8 @@ defmodule Fika.Compiler.CodeServer do
     GenServer.call(__MODULE__, {:set_function_dependency, source, target})
   end
 
-  @spec check_cycle(source :: String.t() | nil) ::
-          :ok | {:error, :cycle_encountered}
-  def check_cycle(node) do
-    GenServer.call(__MODULE__, {:check_cycle, node})
+  def has_cyclic_dependency(signature) do
+    GenServer.call(__MODULE__, {:has_cyclic_dependency, signature})
   end
 
   def init(_) do
@@ -121,17 +118,8 @@ defmodule Fika.Compiler.CodeServer do
     {:noreply, state}
   end
 
-  def handle_cast(:reset, _state) do
-    {:noreply, init_state()}
-  end
-
-  def handle_call(:get_dependency_graph, _from, %{function_dependencies: graph} = state) do
-    vertices = graph |> :digraph.vertices() |> Enum.sort()
-    edges = graph |> :digraph.edges() |> Enum.sort()
-
-    deps = %{vertices: vertices, edges: edges}
-
-    {:reply, deps, state}
+  def handle_call(:reset, _from, _state) do
+    {:reply, :ok, init_state()}
   end
 
   def handle_call({:get_type, module, signature}, from, state) do
@@ -186,6 +174,15 @@ defmodule Fika.Compiler.CodeServer do
     {:reply, result, reset_binaries(state)}
   end
 
+  def handle_call(:get_dependency_graph, _from, %{function_dependencies: graph} = state) do
+    vertices = graph |> :digraph.vertices() |> Enum.sort()
+    edges = graph |> :digraph.edges() |> Enum.sort()
+
+    deps = %{vertices: vertices, edges: edges}
+
+    {:reply, deps, state}
+  end
+
   def handle_call({:set_function_dependency, source, target}, _from, state)
       when is_nil(source) or is_nil(target) do
     {:reply, :ok, state}
@@ -196,24 +193,19 @@ defmodule Fika.Compiler.CodeServer do
         _from,
         %{function_dependencies: graph} = state
       ) do
-    response = __MODULE__.FunctionDependencies.set_function_dependency(graph, source, target)
+    response = FunctionDependencies.set_function_dependency(graph, source, target)
 
     {:reply, response, state}
-  end
-
-  def handle_call({:check_cycle, node}, _from, state)
-      when is_nil(node) do
-    {:reply, :ok, state}
   end
 
   def handle_call(
-        {:check_cycle, node},
+        {:has_cyclic_dependency, signature},
         _from,
         %{function_dependencies: graph} = state
       ) do
-    response = __MODULE__.FunctionDependencies.check_cycle(graph, node)
+    has_cycle = FunctionDependencies.check_cycle(graph, signature) == {:error, :cycle_encountered}
 
-    {:reply, response, state}
+    {:reply, has_cycle, state}
   end
 
   defp beam_filename(module) do
@@ -224,12 +216,6 @@ defmodule Fika.Compiler.CodeServer do
   end
 
   defp set_type(state, module, signature, result) do
-    type =
-      case result do
-        %T.Loop{type: t} -> t
-        t -> t
-      end
-
     update_in(state, [:public_functions, module], fn
       nil -> %{signature => result}
       signatures -> Map.put(signatures, signature, result)
@@ -292,7 +278,7 @@ defmodule Fika.Compiler.CodeServer do
       compile_result: %{},
       parent_pid: nil,
       binaries: [],
-      function_dependencies: __MODULE__.FunctionDependencies.new_graph()
+      function_dependencies: FunctionDependencies.new_graph()
     }
   end
 

@@ -9,6 +9,10 @@ defmodule Fika.Compiler.TypeCheckerTest do
 
   alias Fika.Compiler.TypeChecker.Types, as: T
 
+  setup(_) do
+    CodeServer.reset()
+  end
+
   test "infer type of integer literals" do
     str = "123"
 
@@ -154,12 +158,8 @@ defmodule Fika.Compiler.TypeCheckerTest do
 
   test "infer return type when there is simple recursion" do
     str = """
-    fn factorial(x: Int, acc: Int) : Int do
-      if x <= 1 do
-        acc
-      else
-        factorial(x - 1, acc * x)
-      end
+    fn loop do
+      loop()
     end
     """
 
@@ -168,49 +168,32 @@ defmodule Fika.Compiler.TypeCheckerTest do
 
     env = TypeChecker.init_env(ast)
 
-    assert {:ok, %T.Loop{type: :Int}} = TypeChecker.infer(factorial, env)
+    assert {:ok, %T.Loop{type: :Nothing}} = TypeChecker.infer(factorial, env)
   end
 
-  test "infer return type when there is intra-module recursion" do
+  test "infer return type when there is indirect recursion" do
     str = """
-    fn foo(a: Int) : Int do
+    fn foo(a: Int) do
       bar(a)
     end
 
-    fn bar(a: Int) : Int do
-      if a <= 1 do
-        foobar()
-      else
-        baz(a - 1)
-      end
+    fn bar(a: Int) do
+      baz(a - 1)
     end
 
-    fn baz(a: Int) : Int do
-      if a == 1 do
-        1
-      else
-        foo(a - 1)
-      end
+    fn baz(a: Int) do
+      foo(a - 1)
     end
-
-    fn foobar : Nothing do
-      to_atom("Nothing")
-    end
-
-    ext to_atom(x: String) : Nothing = {"Elixir.String", "to_atom", [x]}
     """
 
     {:ok, ast} = Parser.parse_module(str)
-    [foo, bar, baz, foobar, _to_atom] = ast[:function_defs]
+    [foo, bar, baz] = ast[:function_defs]
 
     env = TypeChecker.init_env(ast)
 
-    assert {:ok, :Nothing} = TypeChecker.infer(foobar, env)
-
-    types = MapSet.new([:Int, :Nothing])
-    assert {:ok, %T.Loop{type: %T.Union{types: ^types}}} = TypeChecker.infer(foo, env)
-    assert {:ok, %T.Loop{type: %T.Union{types: ^types}}} = TypeChecker.infer(bar, env)
-    assert {:ok, %T.Loop{type: %T.Union{types: ^types}}} = TypeChecker.infer(baz, env)
+    assert {:ok, %T.Loop{type: :Nothing}} = TypeChecker.infer(foo, env)
+    assert {:ok, %T.Loop{type: :Nothing}} = TypeChecker.infer(bar, env)
+    assert {:ok, %T.Loop{type: :Nothing}} = TypeChecker.infer(baz, env)
   end
 
   test "infer empty-function recursion" do
@@ -638,7 +621,6 @@ defmodule Fika.Compiler.TypeCheckerTest do
       """
 
       {:ok, ast} = Parser.parse_module(str)
-      CodeServer.reset()
       CodeServer.set_type("test2", "bar(String, Int)", {:ok, :Bool})
       types = MapSet.new([:ok, :error])
       [function] = ast[:function_defs]
@@ -661,7 +643,6 @@ defmodule Fika.Compiler.TypeCheckerTest do
       env = TypeChecker.init_env(ast)
 
       types = MapSet.new([:error, :ok])
-      CodeServer.reset()
       CodeServer.set_type("test2", "bar(String, Int)", {:ok, %T.Union{types: types}})
 
       assert {:ok, %T.Union{types: ^types}} = TypeChecker.infer(function, env)
@@ -696,7 +677,6 @@ defmodule Fika.Compiler.TypeCheckerTest do
 
       {:ok, ast} = Parser.parse_module(str)
       [function] = ast[:function_defs]
-      CodeServer.reset()
       CodeServer.set_type("test2", "bar(String, Int)", {:ok, :Bool})
 
       error =
@@ -742,7 +722,6 @@ defmodule Fika.Compiler.TypeCheckerTest do
       """
 
       {:ok, ast} = Parser.parse_module(str)
-      CodeServer.reset()
       CodeServer.set_type("test", "to_int(String)", {:ok, %T.Effect{type: :Int}})
 
       [function] = ast[:function_defs]
@@ -765,7 +744,6 @@ defmodule Fika.Compiler.TypeCheckerTest do
       [function] = ast[:function_defs]
       env = TypeChecker.init_env(ast)
 
-      CodeServer.reset()
       CodeServer.set_type("test2", "bar()", {:ok, %T.Effect{type: :String}})
 
       assert {:ok, %T.Effect{type: :String}} = TypeChecker.infer(function, env)

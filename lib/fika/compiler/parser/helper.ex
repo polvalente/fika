@@ -105,6 +105,9 @@ defmodule Fika.Compiler.Parser.Helper do
     type
   end
 
+  # TODO: It's not easy to understand what these two patterns are:
+  # {_, _, inner_type} and [inner_type] for list_type, effect_type and loop_type.
+  # If possible refactor, else, add comments.
   def do_to_ast({[{_, _, inner_type}], _line}, :list_type) when is_struct(inner_type) do
     %T.List{type: inner_type}
   end
